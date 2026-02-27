@@ -1,0 +1,47 @@
+# RAG实验统计分析报告
+实验日期: 2025-12-08 21:25:42
+测试世界: RAG Test World
+测试场景数: 10
+每配置运行次数: 3
+
+## 1. 基线对比结果
+
+Context Efficiency: 89.06% reduction
+
+### NO_RAG
+- Input Tokens: 5126.10 ± 1.76
+- Latency: 14.671s ± 8.215s
+- Cost: $0.16618 ± $0.00389
+
+### RANDOM
+- Input Tokens: 584.93 ± 20.15
+- Latency: 10.625s ± 5.544s
+- Cost: $0.02992 ± $0.00330
+
+### RAG
+- Input Tokens: 560.80 ± 35.31
+- Latency: 11.110s ± 5.449s
+- Cost: $0.02974 ± $0.00299
+
+## 2. 统计显著性测试
+
+### rag_vs_no_rag_total_tokens
+- t-statistic: -293.7291
+- p-value: 0.0000
+- Significant (p < 0.05): True
+
+### rag_vs_no_rag_latency
+- t-statistic: -1.9451
+- p-value: 0.0566
+- Significant (p < 0.05): False
+
+### rag_vs_random_total_tokens
+- t-statistic: -1.0589
+- p-value: 0.2940
+- Significant (p < 0.05): False
+
+### rag_vs_random_latency
+- t-statistic: 0.3361
+- p-value: 0.7380
+- Significant (p < 0.05): False
+

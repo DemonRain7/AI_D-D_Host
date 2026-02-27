@@ -1,0 +1,64 @@
+{
+  "scenarios": [
+    {
+      "id": 1,
+      "category": "combat",
+      "player_message": "I want to attack the goblin with my sword",
+      "description": "Simple combat scenario"
+    },
+    {
+      "id": 2,
+      "category": "magic",
+      "player_message": "I cast a fireball spell at the enemy",
+      "description": "Magic attack scenario"
+    },
+    {
+      "id": 3,
+      "category": "exploration",
+      "player_message": "I explore the dark forest looking for treasure",
+      "description": "Exploration scenario"
+    },
+    {
+      "id": 4,
+      "category": "interaction",
+      "player_message": "I talk to the innkeeper and ask about rumors",
+      "description": "NPC interaction scenario"
+    },
+    {
+      "id": 5,
+      "category": "item_use",
+      "player_message": "I drink a healing potion to restore my health",
+      "description": "Item use scenario"
+    },
+    {
+      "id": 6,
+      "category": "skill_check",
+      "player_message": "I try to pick the lock on the treasure chest",
+      "description": "Skill check scenario"
+    },
+    {
+      "id": 7,
+      "category": "complex_action",
+      "player_message": "I sneak past the guards using my stealth ability and then climb the tower",
+      "description": "Complex action scenario"
+    },
+    {
+      "id": 8,
+      "category": "social",
+      "player_message": "I try to persuade the merchant to give me a discount",
+      "description": "Social scenario"
+    },
+    {
+      "id": 9,
+      "category": "environmental",
+      "player_message": "I examine the ancient runes on the wall",
+      "description": "Environmental interaction scenario"
+    },
+    {
+      "id": 10,
+      "category": "combat_tactical",
+      "player_message": "I position myself behind cover and prepare to attack with my bow",
+      "description": "Tactical combat scenario"
+    }
+  ]
+}
