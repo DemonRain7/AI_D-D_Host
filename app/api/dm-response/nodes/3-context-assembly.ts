@@ -313,6 +313,9 @@ function buildNPCsContext(
     context += `- ${npc.name}${aliases}: ${npc.description}`
     if (npc.personality) context += ` 性格: ${npc.personality}`
     if (npc.motivations) context += ` 目标: ${npc.motivations}`
+    if (npc.knownAbilityNames && npc.knownAbilityNames.length > 0) {
+      context += ` 掌握的技能: ${npc.knownAbilityNames.map(a => `「${a}」`).join('、')}`
+    }
     context += `\n`
 
     // Append memory context

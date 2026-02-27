@@ -108,6 +108,8 @@ export type NPC = {
   personality?: string
   motivations?: string
   combat_stats?: NpcCombatStats | null
+  /** Ability names this NPC knows (populated from npc_abilities join) */
+  knownAbilityNames?: string[]
 }
 
 export type PlayerField = {

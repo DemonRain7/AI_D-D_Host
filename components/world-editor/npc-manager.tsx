@@ -14,6 +14,14 @@ import { Switch } from '@/components/ui/switch'
 import { Plus, Edit, Trash2, Upload, X, Sword, Shield, Heart, Zap } from 'lucide-react'
 import Image from 'next/image'
 
+interface DcThresholds {
+  combat?: number | null
+  persuasion?: number | null
+  chaos?: number | null
+  charm?: number | null
+  wit?: number | null
+}
+
 interface CombatStats {
   hp: number
   max_hp: number
@@ -22,6 +30,7 @@ interface CombatStats {
   attack: number
   defense: number
   is_hostile: boolean
+  dc_thresholds?: DcThresholds
 }
 
 const DEFAULT_COMBAT_STATS: CombatStats = {
@@ -691,6 +700,46 @@ export function NPCManager({ worldId }: NPCManagerProps) {
                 </div>
                 <Switch checked={formData.combat_stats.is_hostile}
                   onCheckedChange={(v) => setFormData({ ...formData, combat_stats: { ...formData.combat_stats, is_hostile: v } })} />
+              </div>
+
+              {/* DC Thresholds */}
+              <div className="pt-3 mt-3 border-t border-border">
+                <Label className="text-xs text-fg-1 font-semibold">DC Thresholds</Label>
+                <p className="text-[10px] text-fg-1/60 mb-2">Override AI-determined DC for dice checks against this NPC. Empty = AI decides.</p>
+                <div className="grid grid-cols-5 gap-2">
+                  {([
+                    ['combat', 'Combat'],
+                    ['persuasion', 'Persuasion'],
+                    ['chaos', 'Chaos'],
+                    ['charm', 'Charm'],
+                    ['wit', 'Wit'],
+                  ] as const).map(([key, label]) => (
+                    <div key={key} className="space-y-1">
+                      <Label className="text-[10px] text-fg-1/80">{label}</Label>
+                      <Input
+                        type="number"
+                        value={formData.combat_stats.dc_thresholds?.[key] ?? ''}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? null : Number(e.target.value)
+                          setFormData({
+                            ...formData,
+                            combat_stats: {
+                              ...formData.combat_stats,
+                              dc_thresholds: {
+                                ...formData.combat_stats.dc_thresholds,
+                                [key]: val,
+                              },
+                            },
+                          })
+                        }}
+                        className="bg-bg-1 border-border h-7 text-xs"
+                        placeholder="AI"
+                        min={1}
+                        max={50}
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
 

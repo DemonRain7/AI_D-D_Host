@@ -82,7 +82,7 @@ const SYNC_TOOL: OpenAI.Chat.ChatCompletionTool = {
 const SYSTEM_PROMPT = `你是一个TTRPG游戏状态同步器。你的任务是分析DM的叙述，检测玩家在这一轮中是否获得、失去、或使用了物品/道具。
 
 注意：
-- 不要检测技能/能力的习得或失去
+- **NPC传授技能/能力可以检测为gained**。如果DM明确描述NPC将某个技能传授给玩家且玩家学会了，将该技能名作为gained报告。系统会自动验证技能是否合法（只有世界目录中存在的技能才会被实际添加）。
 - **施放技能/法术（如"释放火球术"、"使用暗影步"）不是物品消耗**。技能通过MP消耗使用，不从背包中扣除。只有物理消耗品（药水、卷轴、食物等一次性道具）才算 used
 - 法术卷轴作为物品处理，通过正常的拾取流程获得
 
@@ -181,14 +181,52 @@ export async function syncNarrativeState(
       .select('id, name, description, item_stats')
       .eq('world_id', worldId)
 
+    // Also pre-fetch abilities catalog for strict validation
+    const { data: catalogAbilities } = await supabase
+      .from('abilities')
+      .select('id, name')
+      .eq('world_id', worldId)
+
     /** Look up a catalog item by normalized name match */
     function findCatalogItem(name: string) {
       return (catalogItems ?? []).find(ci => normalizeName(ci.name) === normalizeName(name))
     }
 
+    /** Look up a catalog ability by normalized name match */
+    function findCatalogAbility(name: string) {
+      return (catalogAbilities ?? []).find(ca => normalizeName(ca.name) === normalizeName(name))
+    }
+
     // ── Apply item changes ──────────────────────────────────────────────
     for (const item of itemChanges) {
       if (item.change === 'gained') {
+        // ── Strict catalog validation ──────────────────────────────────
+        // Only accept items that exist in the world catalog (items OR abilities table).
+        // This prevents DM hallucination from adding non-existent items/abilities.
+        const catalogMatch = findCatalogItem(item.item_name)
+        const abilityMatch = findCatalogAbility(item.item_name)
+
+        if (!catalogMatch && !abilityMatch) {
+          console.log(`[Node 19 · NarrSync] ⚠️ 拒绝未知物品「${item.item_name}」— 不在世界目录中（items/abilities均无匹配）`)
+          continue  // Skip this item entirely
+        }
+
+        // If it matches an ability (not an item): validate NPC ownership
+        if (abilityMatch && !catalogMatch) {
+          const { data: npcHasAbility } = await supabase
+            .from('npc_abilities')
+            .select('id')
+            .eq('ability_id', abilityMatch.id)
+            .limit(1)
+            .maybeSingle()
+
+          if (!npcHasAbility) {
+            console.log(`[Node 19 · NarrSync] ⚠️ 拒绝技能「${item.item_name}」— 无NPC拥有此技能`)
+            continue
+          }
+          console.log(`[Node 19 · NarrSync] 技能匹配世界目录: 「${item.item_name}」→「${abilityMatch.name}」（NPC拥有）`)
+        }
+
         // Check if already exists
         const { data: existing } = await supabase
           .from('player_inventory')
@@ -198,12 +236,15 @@ export async function syncNarrativeState(
           .maybeSingle()
 
         // Look up catalog for item_id and description (no auto-equip — player must equip explicitly)
-        const catalogMatch = findCatalogItem(item.item_name)
         const extraFields: Record<string, unknown> = {}
         if (catalogMatch) {
           extraFields.item_id = catalogMatch.id
           extraFields.custom_properties = { description: catalogMatch.description }
           console.log(`[Node 19 · NarrSync] 物品匹配世界目录: 「${item.item_name}」→「${catalogMatch.name}」`)
+        }
+        // If ability matched (and NPC has it), mark as ability slot
+        if (abilityMatch && !catalogMatch) {
+          extraFields.slot_type = 'ability'
         }
 
         if (existing) {

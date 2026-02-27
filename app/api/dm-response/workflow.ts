@@ -492,9 +492,12 @@ export async function executeDMResponseWorkflow(
 
   // ── COMBAT SAFETY NET ──────────────────────────────────────────────────
   // Node 3C is an LLM and sometimes sets triggered=false even during active
-  // combat. In combat, dice MUST always roll. Uses preInCombat from earlier check.
+  // combat. Only force dice for COMBAT/SPELL_CAST intents — non-combat actions
+  // (EXPLORE, ITEM_USE, SOCIAL, etc.) are allowed without forced dice roll.
+  // NPC still gets a free attack via Node 6's `inCombat && !triggered` path.
   // Exception: equip actions are already handled above as wasted turns.
-  if (preInCombat && !effectiveScenarioEvent.triggered && !isEquipActionInCombat) {
+  const isCombatIntent = intent.intent === 'COMBAT' || intent.intent === 'SPELL_CAST'
+  if (preInCombat && !effectiveScenarioEvent.triggered && !isEquipActionInCombat && isCombatIntent) {
     // Use WIT dice for spell casts, COMBAT for everything else
     const combatDiceType = intent.intent === 'SPELL_CAST' ? 'WIT' as const : 'COMBAT' as const
     console.warn(`[Workflow] ⚠️ 战斗中 Node 3C 未触发场景事件 → 强制触发 ${combatDiceType} 骰`)
@@ -564,6 +567,69 @@ export async function executeDMResponseWorkflow(
     return { dmResponse: retryBlockMessage, messageId: null }
   }
 
+  // ── DC OVERRIDE: Use NPC-stored thresholds when available ─────────────
+  // World designers can set per-NPC DC thresholds in combat_stats.dc_thresholds.
+  // These override the LLM-determined DC from Node 3C.
+  // Additionally, acquisition_dc from abilities/items adds to the DC when the
+  // player is trying to acquire them from an NPC (e.g. persuading to learn a skill).
+  if (effectiveScenarioEvent.triggered && effectiveScenarioEvent.diceType) {
+    const diceKey = effectiveScenarioEvent.diceType.toLowerCase() // COMBAT → combat
+
+    // Find target NPC from RAG results to check dc_thresholds
+    const ragNpcs = intentEntities?.npcs ?? baseData.npcs ?? []
+    const targetNameForDC = intent.targetEntity ?? intent.mentionedEntities[0]
+    const normDC = (s: string) => s.replace(/[「」『』【】\[\]()（）·•・\-—]/g, '').replace(/\s+/g, '').toLowerCase()
+
+    let dcNpc: (typeof ragNpcs)[number] | undefined
+    if (targetNameForDC) {
+      const normTarget = normDC(targetNameForDC)
+      dcNpc = ragNpcs.find(n => {
+        const names = [n.name, ...(n.aliases ?? [])].map(normDC)
+        return names.some(nn => nn.includes(normTarget) || normTarget.includes(nn))
+      })
+    }
+    // In combat: use the combat NPC if no explicit target matched
+    if (!dcNpc && preInCombat && preCombatNpc?.npc_id) {
+      dcNpc = ragNpcs.find(n => n.id === preCombatNpc.npc_id)
+    }
+
+    if (dcNpc) {
+      const combatStats = dcNpc.combat_stats as Record<string, unknown> | null
+      const dcThresholds = combatStats?.dc_thresholds as Record<string, number | null> | undefined
+
+      if (dcThresholds?.[diceKey] != null) {
+        let overrideDC = dcThresholds[diceKey]!
+
+        // Additive: if player is trying to acquire an ability from this NPC,
+        // add the ability's acquisition_dc to the threshold.
+        if (dcNpc.id) {
+          for (const entity of intent.mentionedEntities) {
+            try {
+              const { data: npcAbility } = await supabase
+                .from('npc_abilities')
+                .select('ability_id, abilities!inner(ability_stats)')
+                .eq('npc_id', dcNpc.id)
+                .ilike('abilities.name', entity)
+                .maybeSingle()
+              if (npcAbility) {
+                const abilityStats = (npcAbility.abilities as unknown as { ability_stats?: Record<string, unknown> })?.ability_stats
+                const acqDC = Number(abilityStats?.acquisition_dc ?? 0)
+                if (acqDC > 0) {
+                  overrideDC += acqDC
+                  console.log(`[Workflow · DC Override] +acquisition_dc ${acqDC} for ability「${entity}」`)
+                }
+                break
+              }
+            } catch { /* ignore lookup errors */ }
+          }
+        }
+
+        console.log(`[Workflow · DC Override] NPC「${dcNpc.name}」threshold: ${diceKey}=${overrideDC} (was LLM DC=${effectiveScenarioEvent.dc})`)
+        effectiveScenarioEvent = { ...effectiveScenarioEvent, dc: overrideDC }
+      }
+    }
+  }
+
   if (effectiveScenarioEvent.triggered) {
     onMeta?.({
       type: 'scenario',
@@ -599,7 +665,7 @@ export async function executeDMResponseWorkflow(
       }
     }
   }
-  const precondition = await validatePreconditions({ intent, playerState: effectivePlayerState, storyState, locationItemNames, worldNpcNames })
+  const precondition = await validatePreconditions({ intent, playerState: effectivePlayerState, storyState, locationItemNames, worldNpcNames, worldId, supabase })
 
   // ── NODE 5: Dice Engine (d12 + custom attribute) ─────────────────────────
   const dice = await resolveDice({
@@ -1195,6 +1261,35 @@ export async function executeDMResponseWorkflow(
       }
     : baseData
 
+  // Populate knownAbilityNames for all NPCs going into context —
+  // The DM needs to know what abilities each NPC has to avoid hallucinating non-existent abilities
+  const contextNpcs = mergedData.npcs ?? []
+  const npcIdsForAbilities = contextNpcs.filter(n => n.id).map(n => n.id!)
+  if (npcIdsForAbilities.length > 0) {
+    try {
+      const { data: allNpcAbilityRows } = await supabase
+        .from('npc_abilities')
+        .select('npc_id, abilities(name)')
+        .in('npc_id', npcIdsForAbilities)
+      if (allNpcAbilityRows) {
+        const abilityMap = new Map<string, string[]>()
+        for (const row of allNpcAbilityRows) {
+          const typed = row as { npc_id: string; abilities?: { name?: string } | null }
+          if (!typed.abilities?.name) continue
+          if (!abilityMap.has(typed.npc_id)) abilityMap.set(typed.npc_id, [])
+          abilityMap.get(typed.npc_id)!.push(typed.abilities.name)
+        }
+        for (const npc of contextNpcs) {
+          if (npc.id && abilityMap.has(npc.id)) {
+            npc.knownAbilityNames = abilityMap.get(npc.id)
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[Workflow · NPCAbilities] 加载NPC技能列表失败，跳过:', err)
+    }
+  }
+
   const contextSections = await assembleContext({
     ...mergedData,
     outcomeSynthesis,
@@ -1392,6 +1487,47 @@ export async function executeDMResponseWorkflow(
   // ── NODE 10: Output Persistence ──────────────────────────────────────────
   const output = await persistOutput({ sessionId: sid, dmResponse, supabase })
 
+  // ── Mechanical Ability Granting ──────────────────────────────────────────
+  // When Node 4 validated a SOCIAL+learning request (learningAbility is set)
+  // AND the dice roll succeeded, deterministically insert the ability into
+  // player_inventory. This bypasses the fragile LLM narrative → Node 19 chain.
+  const grantLearnedAbility = async () => {
+    const la = effectivePrecondition.learningAbility
+    if (!la) return
+    // Only grant on SUCCESS or CRITICAL_SUCCESS
+    if (outcomeSynthesis.outcome !== 'SUCCESS' && outcomeSynthesis.outcome !== 'CRITICAL_SUCCESS') {
+      console.log(`[Workflow · AbilityGrant] 骰子未通过 (${outcomeSynthesis.outcome})，不授予技能「${la.abilityName}」`)
+      return
+    }
+    // Check if player already has this ability
+    const { data: existing } = await supabase
+      .from('player_inventory')
+      .select('id')
+      .eq('session_id', sid)
+      .eq('item_name', la.abilityName)
+      .eq('slot_type', 'ability')
+      .maybeSingle()
+    if (existing) {
+      console.log(`[Workflow · AbilityGrant] 玩家已拥有技能「${la.abilityName}」，跳过`)
+      return
+    }
+    const { error } = await supabase
+      .from('player_inventory')
+      .insert({
+        session_id: sid,
+        item_id: null,
+        item_name: la.abilityName,
+        slot_type: 'ability',
+        quantity: 1,
+        equipped: false,
+      })
+    if (error) {
+      console.error(`[Workflow · AbilityGrant] 技能入库失败:`, error)
+    } else {
+      console.log(`[Workflow · AbilityGrant] ✅ 技能「${la.abilityName}」(${la.abilityId}) 已添加到玩家背包`)
+    }
+  }
+
   // ── NODES 11–19: State updates (awaited, with SSE progress) ─────────────
   // All state updates are awaited so the SSE 'done' event fires only after
   // everything is persisted. Frontend can then do a single refresh.
@@ -1445,6 +1581,7 @@ export async function executeDMResponseWorkflow(
         openai,
       }),
       ...(isDead ? [activateDeathEnding({ sessionId: sid, worldId, supabase })] : []),
+      grantLearnedAbility(),
       updateNPCMemories({
         sessionId: sid,
         npcs: relevantNPCs,

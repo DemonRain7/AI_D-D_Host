@@ -77,6 +77,11 @@ export type PreconditionResult = {
     attackBonus: number
     saveDC: number
   }
+  /** When a SOCIAL+learning request is validated, carries the ability info for mechanical granting */
+  learningAbility?: {
+    abilityId: string
+    abilityName: string
+  }
 }
 
 export type DiceResolution = {

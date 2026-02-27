@@ -65,10 +65,16 @@ Classify the player's action into exactly ONE intent type:
 ## Critical Classification Rules:
 1. **SPELL_CAST vs COMBAT**: If the player uses a spell/ability/skill name (火球术, 冰冻术, 暗影步, etc.) to attack → SPELL_CAST. If the player uses a physical weapon/item (剑, 戒指, 斧头) or bare hands to attack → COMBAT.
 2. **ITEM_USE vs COMBAT**: If the player uses an item (weapon/equipment) TO ATTACK a target → COMBAT (not ITEM_USE). If the player only uses/consumes/equips an item without attacking → ITEM_USE.
-3. Set targetEntity to the PRIMARY TARGET of the action:
+3. **Non-combat actions during combat**: Even if the player is currently in combat, non-attack actions must be classified correctly:
+   - 拾取/捡起物品 → EXPLORE (NOT COMBAT)
+   - 离开/逃跑/撤退 → EXPLORE (NOT COMBAT)
+   - 使用/喝下消耗品（药水等）→ ITEM_USE (NOT COMBAT)
+   - 与NPC对话/请求 → SOCIAL (NOT COMBAT)
+4. Set targetEntity to the PRIMARY TARGET of the action:
    - For attacks (COMBAT/SPELL_CAST): targetEntity = the NPC being attacked (e.g. "幻影刺客")
    - For ITEM_USE: targetEntity = the item being used (e.g. "治愈水晶")
-4. Extract ALL entity names (items, NPCs, spells, locations) into mentionedEntities.
+5. Extract ALL entity names (items, NPCs, spells, locations) into mentionedEntities.
+6. **SOCIAL + learning**: When the player asks an NPC to teach/learn a skill or ability (学/教/传授/领悟), set targetEntity = the NPC, and extract the ability/skill name into mentionedEntities. Example: "老头教我个无敌吧" → intent=SOCIAL, targetEntity="老头", mentionedEntities=["老头", "无敌"]. This is critical — always extract the specific ability name the player wants to learn.
 
 Set isBatchAction=true when the player wants to act on ALL or MULTIPLE unspecified targets at once.
 Examples of batch actions: "拾取所有物品", "全部拿走", "把东西都收了", "装备所有", "pick up everything", "equip all".

@@ -24,6 +24,7 @@ interface ItemStats {
   mp_restore?: number    // consumable
   grants_ability?: string  // skill_tome
   special_effect?: string  // weapon / armor / accessory — free-text special effect description
+  acquisition_dc?: number  // extra DC for persuading NPC to give this item
 }
 
 interface Item {
@@ -556,6 +557,17 @@ export function ItemManager({ worldId }: ItemManagerProps) {
                   <Input value={formData.item_stats.grants_ability ?? ''}
                     onChange={(e) => setFormData({ ...formData, item_stats: { ...formData.item_stats, grants_ability: e.target.value } })}
                     className="bg-bg-1 border-border h-8 text-sm" placeholder="Ability name" />
+                </div>
+              )}
+              {formData.item_stats.type && (
+                <div className="pt-3 mt-2 border-t border-border/50">
+                  <div className="space-y-1">
+                    <Label className="text-xs text-fg-1">Acquisition DC</Label>
+                    <Input type="number" value={formData.item_stats.acquisition_dc ?? ''}
+                      onChange={(e) => setFormData({ ...formData, item_stats: { ...formData.item_stats, acquisition_dc: e.target.value === '' ? undefined : Number(e.target.value) } })}
+                      className="bg-bg-1 border-border h-8 text-sm w-32" placeholder="0" min={0} max={50} />
+                    <p className="text-[10px] text-fg-1/50">Extra DC added when a player tries to obtain this item from an NPC (stacks with NPC&apos;s Persuasion DC)</p>
+                  </div>
                 </div>
               )}
             </div>

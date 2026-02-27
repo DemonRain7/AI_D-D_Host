@@ -19,6 +19,7 @@ interface AbilityStats {
   damage: number
   hp_restore: number
   effect_type: EffectType
+  acquisition_dc?: number
 }
 
 interface Ability {
@@ -294,6 +295,15 @@ export function AbilityManager({ worldId }: AbilityManagerProps) {
                   </div>
                 </div>
               )}
+              <div className="pt-3 mt-2 border-t border-border/50">
+                <div className="space-y-1">
+                  <Label className="text-xs text-fg-1">Acquisition DC</Label>
+                  <Input type="number" value={formData.ability_stats.acquisition_dc ?? ''}
+                    onChange={(e) => setFormData({ ...formData, ability_stats: { ...formData.ability_stats, acquisition_dc: e.target.value === '' ? undefined : Number(e.target.value) } })}
+                    className="bg-bg-1 border-border h-8 text-sm w-32" placeholder="0" min={0} max={50} />
+                  <p className="text-[10px] text-fg-1/50">Extra DC added when a player tries to learn this ability from an NPC (stacks with NPC&apos;s Persuasion DC)</p>
+                </div>
+              </div>
             </div>
 
             <div className="flex gap-4 justify-end pt-4">

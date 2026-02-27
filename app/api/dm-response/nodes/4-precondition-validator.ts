@@ -20,6 +20,7 @@ import type { PreconditionResult } from '../types/game-mechanics'
 import { FALLBACK_PRECONDITION } from '../types/game-mechanics'
 import type { PlayerState } from '../types/player-state'
 import type { StoryState } from './3e-story-state-loader'
+import { SupabaseClient } from '@supabase/supabase-js'
 
 // ============================================================================
 // Shared: Strict Name Normalizer
@@ -122,12 +123,15 @@ function checkInventory(
 /**
  * For SPELL_CAST: checks if the mentioned ability/spell exists in
  * the player's inventory (slot_type='ability'). Uses strict name matching.
- * Also checks spell slots if tracked.
+ * Also cross-validates against world's abilities table — rejects abilities
+ * not in the catalog (e.g. hallucinated abilities added by Node 19).
  */
-function checkSpellSlots(
+async function checkSpellSlots(
   intent: IntentClassification,
-  playerState: PlayerState
-): PreconditionResult {
+  playerState: PlayerState,
+  worldId?: string,
+  supabase?: SupabaseClient
+): Promise<PreconditionResult> {
   if (intent.intent !== 'SPELL_CAST') return { canProceed: true, result: 'PASSED' }
 
   // Check ability name against inventory abilities.
@@ -162,6 +166,26 @@ function checkSpellSlots(
     }
 
     console.log(`[Node 4 · Precondition] 技能匹配成功: 「${matchedAbility}」`)
+
+    // Cross-check: ability must exist in world's abilities table
+    // This prevents hallucinated abilities (added by Node 19 from DM narrative) from being used
+    if (worldId && supabase) {
+      const { data: catalogAbility } = await supabase
+        .from('abilities')
+        .select('id')
+        .eq('world_id', worldId)
+        .ilike('name', matchedAbility)
+        .maybeSingle()
+
+      if (!catalogAbility) {
+        console.log(`[Node 4 · Precondition] ⚠️ 技能「${matchedAbility}」在背包中但不在世界目录中 → 拒绝`)
+        return {
+          canProceed: false,
+          result: 'FAILED',
+          failReason: `「${matchedAbility}」不是一个有效的技能。`,
+        }
+      }
+    }
   }
 
   // Spell info for dice engine (no spell slot checking — world module extension)
@@ -284,6 +308,124 @@ function checkSceneCoherence(
 }
 
 // ============================================================================
+// Micro-Agent E: Ability Learning Validator (SOCIAL — learning from NPCs)
+// ============================================================================
+
+/**
+ * For SOCIAL intent with learning keywords (学/教/传授/领悟): validates that
+ * the ability the player wants to learn actually exists in the world catalog
+ * AND that the target NPC possesses it (via npc_abilities).
+ *
+ * This prevents the DM from narrating "you learned X" for abilities that
+ * don't exist or that the NPC doesn't know — the dice roll is blocked entirely.
+ */
+async function checkAbilityLearning(
+  intent: IntentClassification,
+  worldId?: string,
+  supabase?: SupabaseClient
+): Promise<PreconditionResult> {
+  if (intent.intent !== 'SOCIAL') return { canProceed: true, result: 'PASSED' }
+  if (!worldId || !supabase) return { canProceed: true, result: 'PASSED' }
+
+  // Detect learning intent from raw message
+  const raw = intent.rawMessage ?? ''
+  if (!/学|教|传授|领悟|learn|teach/i.test(raw)) {
+    return { canProceed: true, result: 'PASSED' }
+  }
+
+  // Candidates: mentionedEntities minus the targetEntity (which is the NPC)
+  const candidates = intent.mentionedEntities.filter(
+    e => !intent.targetEntity || !namesMatch(e, intent.targetEntity)
+  )
+  if (candidates.length === 0) return { canProceed: true, result: 'PASSED' }
+
+  // Fetch all world NPCs (including aliases) for robust name matching.
+  // NPC aliases like "老头" won't match ilike('%老头%') against name "裁判·奥斯卡",
+  // so we do in-memory matching with both name and aliases.
+  const { data: worldNpcs } = await supabase
+    .from('npcs')
+    .select('id, name, aliases')
+    .eq('world_id', worldId)
+  const npcList = (worldNpcs ?? []) as Array<{ id: string; name: string; aliases?: string[] }>
+
+  const isNpcName = (s: string) => npcList.some(n => {
+    const names = [n.name, ...(n.aliases ?? [])]
+    const ns = normalizeName(s)
+    return names.some(nn => {
+      const nnn = normalizeName(nn)
+      return nnn === ns || nnn.includes(ns) || ns.includes(nnn)
+    })
+  })
+
+  const findNpc = (s: string) => npcList.find(n => {
+    const names = [n.name, ...(n.aliases ?? [])]
+    const ns = normalizeName(s)
+    return names.some(nn => {
+      const nnn = normalizeName(nn)
+      return nnn === ns || nnn.includes(ns) || ns.includes(nnn)
+    })
+  })
+
+  for (const candidate of candidates) {
+    // Skip if this matches a known NPC name or alias
+    if (isNpcName(candidate)) continue
+
+    // Check if ability exists in world catalog
+    const { data: ability } = await supabase
+      .from('abilities')
+      .select('id, name')
+      .eq('world_id', worldId)
+      .ilike('name', candidate)
+      .maybeSingle()
+
+    if (!ability) {
+      console.log(`[Node 4 · Precondition] 学习验证失败: 「${candidate}」不在世界技能目录中`)
+      return {
+        canProceed: false,
+        result: 'FAILED',
+        failReason: `这个世界中并不存在「${candidate}」这种技能。`,
+      }
+    }
+
+    // Ability exists — check if the target NPC has it
+    if (intent.targetEntity) {
+      const npc = findNpc(intent.targetEntity)
+
+      if (npc) {
+        const { data: npcHas } = await supabase
+          .from('npc_abilities')
+          .select('id')
+          .eq('npc_id', npc.id)
+          .eq('ability_id', ability.id)
+          .maybeSingle()
+
+        if (!npcHas) {
+          console.log(`[Node 4 · Precondition] 学习验证失败: NPC「${intent.targetEntity}」(${npc.name}) 不拥有技能「${candidate}」`)
+          return {
+            canProceed: false,
+            result: 'FAILED',
+            failReason: `对方似乎并不懂得「${candidate}」这种技能。`,
+          }
+        }
+      }
+    }
+
+    // All checks passed — return with learningAbility info for mechanical granting
+    console.log(`[Node 4 · Precondition] 学习验证通过: 技能「${ability.name}」(${ability.id})`)
+    return {
+      canProceed: true,
+      result: 'PASSED',
+      learningAbility: {
+        abilityId: ability.id,
+        abilityName: ability.name,
+      },
+    }
+  }
+
+  return { canProceed: true, result: 'PASSED' }
+}
+
+// ============================================================================
 // Main Validator: Runs All Micro-Agents
 // ============================================================================
 
@@ -295,41 +437,47 @@ export type PreconditionValidatorInput = {
   locationItemNames?: string[]
   /** NPC names from RAG/world data — used by scene coherence to accept dynamically-spawned NPCs */
   worldNpcNames?: string[]
+  /** World ID for catalog cross-validation (abilities table) */
+  worldId?: string
+  /** Supabase client for catalog cross-validation queries */
+  supabase?: SupabaseClient
 }
 
 /**
- * Runs all four micro-agents in parallel and merges their results.
+ * Runs all five micro-agents in parallel and merges their results.
  * If any agent returns FAILED, the overall result is FAILED.
  * Fallback: canProceed=true on any uncaught error.
  */
 export async function validatePreconditions(
   input: PreconditionValidatorInput
 ): Promise<PreconditionResult> {
-  const { intent, playerState, storyState, locationItemNames, worldNpcNames } = input
+  const { intent, playerState, storyState, locationItemNames, worldNpcNames, worldId, supabase } = input
 
   try {
-    // All four micro-agents run concurrently
-    const [inventoryResult, spellResult, abilityResult, sceneResult] = await Promise.all([
+    // All five micro-agents run concurrently
+    const [inventoryResult, spellResult, abilityResult, sceneResult, learningResult] = await Promise.all([
       Promise.resolve(checkInventory(intent, playerState, locationItemNames)).catch(() => FALLBACK_PRECONDITION),
-      Promise.resolve(checkSpellSlots(intent, playerState)).catch(() => FALLBACK_PRECONDITION),
+      checkSpellSlots(intent, playerState, worldId, supabase).catch(() => FALLBACK_PRECONDITION),
       Promise.resolve(checkAbilityAndWeapon(intent, playerState)).catch(() => FALLBACK_PRECONDITION),
       Promise.resolve(checkSceneCoherence(intent, storyState ?? null, worldNpcNames)).catch(() => FALLBACK_PRECONDITION),
+      checkAbilityLearning(intent, worldId, supabase).catch(() => FALLBACK_PRECONDITION),
     ])
 
-    // If any check fails, return that failure (scene coherence checked first — highest priority)
-    for (const result of [sceneResult, inventoryResult, spellResult, abilityResult]) {
+    // If any check fails, return that failure (learning + scene coherence checked first — highest priority)
+    for (const result of [learningResult, sceneResult, inventoryResult, spellResult, abilityResult]) {
       if (!result.canProceed) {
         console.log(`[Node 4 · Precondition] 失败: ${result.failReason}`)
         return result
       }
     }
 
-    // Merge successful results (carry weapon/spell info forward)
+    // Merge successful results (carry weapon/spell/learning info forward)
     const merged: PreconditionResult = {
       canProceed: true,
       result: 'PASSED',
       weaponStats: abilityResult.weaponStats,
       spellInfo: spellResult.spellInfo,
+      learningAbility: learningResult.learningAbility,
     }
 
     console.log(`[Node 4 · Precondition] 通过 - 武器=${merged.weaponStats?.weaponName ?? '无'} 法术位=${merged.spellInfo?.slotLevel ?? '无'}`)
