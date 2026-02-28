@@ -1,214 +1,239 @@
-# LLM GM
+# LLM GM — AI Dungeon Master System
 
-A comprehensive world-building and session management platform built with Next.js, Supabase, and modern web technologies.
-
-## Features
-
-- **World Building**: Create and manage AI-powered worlds with canon entities (NPCs, items, abilities, locations, organizations, taxonomies, rules, story nodes)
-- **Session Management**: Run interactive sessions within your worlds with dynamic player tracking
-- **RAG-Powered Context**: Intelligent retrieval of relevant game entities using vector similarity search (reduces context size by ~75%)
-- **Authentication**: Secure authentication with Supabase (Email/Password and Google OAuth)
-- **Real-time Chat**: Live session chat with real-time updates
-- **Dynamic Player Fields**: Customizable player attributes per world
-- **Beautiful UI**: Modern, animated interface with Framer Motion and shadcn/ui
+An LLM-based TTRPG (tabletop role-playing game) AI Dungeon Master system. Users create fantasy worlds (NPCs, items, abilities, story graphs), then play as adventurers against an AI DM. The core is a **20-node multi-agent pipeline** that handles intent classification, vector retrieval, dice mechanics, combat resolution, streaming narrative generation, and state persistence in a single closed loop.
 
 ## Tech Stack
 
-- **Framework**: Next.js 15 (App Router)
-- **Database**: Supabase (PostgreSQL with pgvector, ltree)
-- **AI/LLM**: OpenAI GPT-4 + text-embedding-ada-002
-- **RAG**: Vector similarity search with pgvector (IVFFlat indexing)
-- **Authentication**: Supabase Auth
-- **UI Components**: shadcn/ui
-- **Styling**: Tailwind CSS v4
-- **Animations**: Framer Motion
-- **Forms**: React Hook Form + Zod
-- **Icons**: Lucide React
+| Layer | Technology |
+|-------|-----------|
+| **Framework** | Next.js 15 (App Router) + React 19 |
+| **Database** | Supabase (PostgreSQL + pgvector) |
+| **LLM** | OpenAI GPT-4.1 (Function Calling + Streaming) |
+| **Vector Search** | text-embedding-3-small (1536-dim), pgvector IVFFlat |
+| **Real-time** | SSE (Server-Sent Events) |
+| **UI** | Tailwind CSS + shadcn/ui (Radix) |
+| **Animations** | Framer Motion |
+| **Story Editor** | ReactFlow / XYFlow |
+| **Forms** | React Hook Form + Zod |
+| **Observability** | LangSmith (optional, `wrapOpenAI()`) |
 
-## Getting Started
+**No LangChain.** The entire pipeline is built directly on the OpenAI SDK (`openai` npm package), with each node as an independent TypeScript function orchestrated by `workflow.ts`.
 
-### Prerequisites
+## Features
 
-- Node.js 18+ installed
-- A Supabase account and project
+### World Building
+- Create worlds with custom settings, tone, and starter text
+- Define NPCs (with combat stats, equipment, abilities, dc thresholds)
+- Define items (weapons, armor, accessories, consumables with JSONB stats)
+- Define abilities (damage, MP cost, HP restore, acquisition DC)
+- Define locations (with aliases, connected via story nodes)
+- Story graph editor (nodes + edges, completion triggers, ending scripts)
+- Custom player fields (gold, reputation, etc.)
+- Auto-generated vector embeddings for all entities
 
-### Installation
+### Gameplay (AI DM Pipeline)
+- **7 intent types**: COMBAT, SPELL_CAST, ITEM_USE, EXPLORE, SOCIAL, NARRATIVE, META
+- **Intent-aware RAG**: retrieval strategy adapts per intent (thresholds, table weights)
+- **d12 dice system**: 5 dimensions (Combat, Persuasion, Chaos, Charm, Wit), adaptive DC scaling
+- **ATK-DEF combat**: `max(1, ATK - DEF)` for physical, `max(1, ability_damage - DEF)` for spells
+- **9-slot equipment**: 2 weapons + 3 armor + 4 accessories, auto-equip on pickup
+- **NPC combat AI**: LLM strategy agent with pure-function fallback
+- **NPC memory**: cross-turn attitude and memory tracking
+- **Milestone detection**: 5-dimension scoring for significant events
+- **Story progression**: automatic node completion and edge traversal
+- **Streaming narrative**: SSE real-time text + structured events (dice, combat, progress)
+- **Location system**: 3-pass regex + LLM authoritative confirmation
+- **Multi-layer anti-hallucination**: combat safety net, target gating, HP double-deduction guard, catalog validation, vague target rejection
 
-1. Clone the repository:
-```bash
-git clone <your-repo-url>
-cd llm-gm
-```
-
-2. Install dependencies:
-```bash
-npm install
-```
-
-3. Set up environment variables:
-```bash
-cp .env.local.example .env.local
-```
-
-Edit `.env.local` and add your credentials:
-```env
-NEXT_PUBLIC_SUPABASE_URL=your-supabase-url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key  # For batch scripts
-OPENAI_API_KEY=sk-...  # For RAG embeddings and AI generation
-```
-
-4. Run database migrations:
-
-Go to your Supabase project dashboard → SQL Editor and run each migration file in the `migrations/` folder in numerical order (001 through 022).
-
-**Important migrations:**
-- `021_storage_setup.sql` - Storage bucket for image uploads
-- `022_rag_vector_search.sql` - RAG vector search functions (**required for RAG to work**)
-
-Alternatively, if you have Supabase CLI installed:
-```bash
-for file in migrations/*.sql; do
-  supabase db execute -f "$file"
-done
-```
-
-5. Start the development server:
-```bash
-npm run dev
-```
-
-6. Open [http://localhost:3000](http://localhost:3000) in your browser.
+### Frontend
+- Streaming chat with DM narrative
+- Player panel (HP/MP/ATK/DEF, inventory, abilities, attributes)
+- Enemy panel (HP bar, abilities, equipment, per-turn action display)
+- Dice animation and combat summary
+- SSE-driven progress bar
 
 ## Project Structure
 
 ```
 llm-gm/
-├── app/                    # Next.js app router pages
-│   ├── auth/              # Authentication pages
-│   ├── browse/            # Browse worlds page
-│   ├── manage/            # Manage worlds pages
-│   ├── sessions/          # Session management pages
-│   ├── layout.tsx         # Root layout
-│   └── page.tsx           # Landing page
-├── components/            # React components
-│   ├── layout/           # Layout components (Navbar, etc.)
-│   └── ui/               # shadcn/ui components
-├── contexts/             # React contexts (Auth)
-├── lib/                  # Utility libraries
-│   ├── supabase/        # Supabase client setup
-│   ├── database.types.ts # Database types
-│   └── utils.ts         # Utility functions
-├── migrations/          # Database migration files
-└── public/             # Static assets
+├── app/
+│   ├── api/
+│   │   ├── dm-response/           # Core DM pipeline
+│   │   │   ├── workflow.ts        # 20-node orchestrator (~1700 lines)
+│   │   │   ├── route.ts           # SSE endpoint (POST /api/dm-response)
+│   │   │   ├── prompts.ts         # DM system prompts
+│   │   │   ├── nodes/             # 31 pipeline node files
+│   │   │   │   ├── 0-action-validity-gate.ts
+│   │   │   │   ├── 1-input-validation.ts
+│   │   │   │   ├── 2-intent-classifier.ts
+│   │   │   │   ├── 2-data-retrieval.ts
+│   │   │   │   ├── 2c-meta-handler.ts
+│   │   │   │   ├── 3a-intent-aware-rag.ts
+│   │   │   │   ├── 3b-player-state-loader.ts
+│   │   │   │   ├── 3c-scenario-event-generator.ts
+│   │   │   │   ├── 3e-story-state-loader.ts
+│   │   │   │   ├── 3f-npc-memory-loader.ts
+│   │   │   │   ├── 3-context-assembly.ts
+│   │   │   │   ├── 4-precondition-validator.ts
+│   │   │   │   ├── 4-prompt-construction.ts
+│   │   │   │   ├── 5-dice-engine.ts
+│   │   │   │   ├── 5-llm-generation.ts
+│   │   │   │   ├── 6-outcome-synthesizer.ts
+│   │   │   │   ├── 6-output-persistence.ts
+│   │   │   │   ├── 6b-npc-action-agent.ts
+│   │   │   │   ├── 6c-npc-combat-strategy-agent.ts
+│   │   │   │   ├── 7-dynamic-field-update.ts
+│   │   │   │   ├── 11-hp-mp-updater.ts
+│   │   │   │   ├── 12-inventory-updater.ts
+│   │   │   │   ├── 13-status-effect-updater.ts
+│   │   │   │   ├── 14-events-log-writer.ts
+│   │   │   │   ├── 15-attribute-updater.ts
+│   │   │   │   ├── 16-milestone-detector.ts
+│   │   │   │   ├── 17-story-node-completion.ts
+│   │   │   │   ├── 18-npc-memory-updater.ts
+│   │   │   │   ├── 19-narrative-state-sync.ts
+│   │   │   │   ├── 19b-equipment-manager.ts
+│   │   │   │   └── rag-retrieval.ts
+│   │   │   └── types/             # Pipeline type definitions
+│   │   ├── generate-embedding/    # POST /api/generate-embedding
+│   │   └── admin/                 # POST /api/admin/reembed
+│   ├── auth/                      # Auth pages (login/signup)
+│   ├── browse/                    # Browse worlds
+│   ├── manage/                    # World editor (tabbed UI)
+│   ├── sessions/                  # Game session pages
+│   │   └── [id]/page.tsx          # Main gameplay UI (~2500 lines)
+│   ├── layout.tsx
+│   └── page.tsx                   # Landing page
+├── components/
+│   ├── layout/                    # Navbar, etc.
+│   ├── ui/                        # shadcn/ui components
+│   └── world-editor/              # World editor components
+├── contexts/                      # React contexts (Auth)
+├── lib/
+│   ├── config.ts                  # Model configuration (MODEL_FAST, etc.)
+│   ├── supabase/                  # Supabase client setup
+│   ├── database.types.ts          # Generated DB types
+│   └── utils.ts
+├── migrations/                    # Supabase SQL migrations
+├── scripts/                       # Batch embedding scripts
+└── docs/                          # Architecture documentation
 ```
 
 ## Database Schema
 
-### Canon Tables (World-scoped)
-- `worlds` - World definitions
-- `abilities` - Character abilities
-- `items` - Items and equipment
-- `organizations` - Factions and groups
-- `taxonomies` - Classification systems
-- `locations` - Hierarchical locations (using ltree)
-- `npcs` - Non-player characters
-- `rules` - World rules and mechanics
-- `story_nodes` - Story progression nodes
-- `story_edges` - Story connections
-- `world_player_fields` - Custom player field definitions
+### World Tables (Canon)
 
-### Runtime Tables (Session-scoped)
-- `sessions` - Game sessions
-- `players` - Player characters
-- `generated_items` - Session-specific items
-- `generated_characters` - Session-specific NPCs
-- `generated_locations` - Session-specific locations
-- `generated_abilities` - Session-specific abilities
-- `session_messages` - Chat messages
-- `session_canon_state` - Session-specific state overrides
+| Table | Purpose |
+|-------|---------|
+| `worlds` | World settings, tone, description, starter text |
+| `npcs` | NPCs with combat_stats (JSONB), dc_thresholds, embedding |
+| `items` | Items with item_stats (JSONB: weapon/armor/accessory/consumable), embedding |
+| `abilities` | Abilities with ability_stats (JSONB: damage, mp_cost, hp_restore), embedding |
+| `npc_abilities` | NPC-ability junction (which NPCs know which abilities) |
+| `npc_equipment` | NPC equipment (slot_type, droppable flag) |
+| `locations` | Locations with aliases, embedding |
+| `organizations` | Factions and groups |
+| `taxonomies` | Classification systems |
+| `rules` | World rules and mechanics |
+| `story_nodes` | Story graph nodes (node_type, completion_trigger, ending_script) |
+| `story_edges` | Story graph edges (from/to, edge_type) |
+| `world_player_fields` | Custom player field definitions per world |
 
-## Key Features
+### Session Tables (Runtime)
 
-### Authentication
-- Email/Password authentication
-- Google OAuth
-- Protected routes with middleware
-- Persistent sessions
+| Table | Purpose |
+|-------|---------|
+| `sessions` | Game sessions (world_id, current_location_id) |
+| `players` | Player characters (dynamic_fields JSONB) |
+| `player_core_stats` | HP, MP, ATK, DEF |
+| `player_inventory` | Items + abilities (item_name, quantity, equipped, slot_type, item_id FK) |
+| `player_custom_attributes` | 5 dimensions: combat, persuasion, chaos, charm, wit |
+| `player_status_effects` | Buffs/debuffs (duration, effect_type) |
+| `session_messages` | Chat history |
+| `session_npc_stats` | Per-session NPC HP/MP (current_hp, is_alive, in_combat) |
+| `session_npc_memories` | NPC attitude, status, key memories |
+| `session_milestones` | Significant events (5-dim scoring, threshold 40) |
+| `session_story_state` | Story node status (active/completed) |
+| `session_events` | Full turn log (intent, dice, outcome, effects, latency) |
 
-### World Management
-- Create and edit worlds
-- Define NPCs, items, abilities, locations, and more
-- Tabbed editor interface
-- Auto-save functionality
-- Image upload support
+## Pipeline Overview
 
-### Session Management
-- Browse and start sessions from existing worlds
-- Dynamic player creation with custom fields
-- Real-time chat interface
-- Player state tracking
-- Session history
+Each player message triggers a 20-node pipeline through `POST /api/dm-response`:
 
-### Design System
-- Custom dark theme with cyan/violet/amber accents
-- Consistent spacing and typography
-- Smooth animations and transitions
-- Responsive design
-- Accessibility-friendly
-
-## Development
-
-### Running Tests
-```bash
-npm test
+```
+Input Validation → Parallel(Data + Intent) → META short-circuit
+  → Player State → Parallel(RAG + Scenario + Milestones + Story + NPC Memory)
+  → Location System → Action Gate → Vague Target Check
+  → Combat Safety Net → Retry Penalty → DC Override
+  → Preconditions → Dice Engine → Equipment/NPC Preprocessing
+  → Combat Detection → NPC Strategy → Outcome Synthesis → NPC Actions
+  → Death Detection → Context Assembly → Prompt → Streaming LLM → SSE
+  → Phase 1: Parallel(HP/Inventory/Status/Events/Attrs/Milestone/Story/NPC Memory)
+  → Phase 2: Dynamic Fields → Phase 3: Narrative Sync → Phase 4: Equipment Manager
 ```
 
-### Building for Production
+10-12 LLM calls per turn, parallelized with `Promise.all`. See [docs/PIPELINE_DOCUMENTATION.md](docs/PIPELINE_DOCUMENTATION.md) for full technical documentation.
+
+## API Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/dm-response` | POST | Core pipeline (SSE streaming response) |
+| `/api/generate-embedding` | POST | Generate vector embedding for an entity |
+| `/api/admin/reembed` | POST | Batch re-embed all entities in a world |
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 18+
+- A Supabase project
+- An OpenAI API key
+
+### Installation
+
 ```bash
-npm run build
-npm start
+git clone <your-repo-url>
+cd llm-gm
+npm install
 ```
 
 ### Environment Variables
 
-Required environment variables:
-- `NEXT_PUBLIC_SUPABASE_URL` - Your Supabase project URL
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY` - Your Supabase anonymous key
-- `OPENAI_API_KEY` - Your OpenAI API key (for embeddings and AI generation)
-- `SUPABASE_SERVICE_ROLE_KEY` - Your Supabase service role key (for batch embedding scripts)
+```bash
+cp .env.local.example .env.local
+```
 
-## Contributing
+```env
+NEXT_PUBLIC_SUPABASE_URL=your-supabase-url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+OPENAI_API_KEY=sk-...
+# Optional: LangSmith tracing
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=your-langsmith-key
+```
 
-Contributions are welcome! Please follow these steps:
+### Database Setup
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Run migrations in order from the `migrations/` folder in your Supabase SQL Editor:
 
-## License
+```bash
+# Or with Supabase CLI:
+for file in migrations/*.sql; do
+  supabase db execute -f "$file"
+done
+```
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+### Run
 
-## RAG System
+```bash
+npm run dev
+# Open http://localhost:3000
+```
 
-This project implements a **Retrieval-Augmented Generation (RAG)** system for intelligent context selection:
+## Documentation
 
-- **Vector Embeddings**: Each game entity (item, NPC, location, etc.) has a 1536-dimensional embedding
-- **Semantic Search**: Uses pgvector with IVFFlat indexing for fast similarity search
-- **Smart Context**: Only retrieves top 3-5 most relevant entities per category (vs. all entities)
-- **Cost Reduction**: Reduces LLM context size by ~75%, significantly lowering API costs
-- **Auto-Generation**: Embeddings are automatically generated when creating/editing entities
-
-For detailed RAG implementation guide, see [RAG_IMPLEMENTATION.md](RAG_IMPLEMENTATION.md).
-
-## Acknowledgments
-
-- Built with [Next.js](https://nextjs.org/)
-- Powered by [Supabase](https://supabase.com/)
-- AI by [OpenAI](https://openai.com/)
-- Vector search with [pgvector](https://github.com/pgvector/pgvector)
-- UI components from [shadcn/ui](https://ui.shadcn.com/)
-- Animations with [Framer Motion](https://www.framer.com/motion/)
+- [Pipeline Technical Documentation](docs/PIPELINE_DOCUMENTATION.md) — Full 20-node pipeline architecture
+- [Interview Guide](docs/INTERVIEW.md) — Project walkthrough for interviews
+- [Resume Prompt](docs/RESUME_PROMPT.md) — Resume material for LLM-assisted writing
