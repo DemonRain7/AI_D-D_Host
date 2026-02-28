@@ -4,20 +4,33 @@
  * 20-node pipeline with parallel branches and SSE streaming.
  *
  * Execution order:
- *   [1]          Input Validation
- *   [2A+B]       retrieveData + classifyIntent                       ← parallel
- *   [3A+B+C+D+E+F] RAG + player state + scenario event + milestones + story + NPC memories ← parallel
- *   [4]          validatePreconditions (pure, no DB)
- *   [5]          resolveDice (d12 + custom attribute, no LLM)
- *   [6]          synthesizeOutcome (pure)
- *   [6B]         NPC Action Agent (MODEL_FAST, ~1s)
- *   [7]          assembleContext (merge all data + outcome + milestones + NPC actions)
- *   [8]          constructPrompt
- *   [9]          generateResponse (streaming SSE)
- *   [10]         persistOutput
- *   [11-17+18]   background state updates + NPC memory update (fire-and-forget)
- *   [7]          dynamic field update (after Node 11, avoids race condition)
- *   [19]         narrative state sync — detect items/abilities from DM text (after Node 7)
+ *   [1]            Input Validation
+ *   [2A+2B]        retrieveData + classifyIntent                       ← parallel
+ *   [META]         Short-circuit for META intents (template response)
+ *   [3B]           Player State Loader (first — other nodes depend on its attrs)
+ *   [3A+3C+3D+3E+3F] RAG + scenario event + milestones + story + NPC memories ← parallel
+ *   [Location]     3-pass regex + LLM authoritative confirmation (pre-DM)
+ *   [0]            Action Validity Gate (item accessibility check)
+ *   [VagueTarget]  Vague target rejection ("敌人"/"怪物" → short-circuit)
+ *   [CombatSafety] Combat safety net + retry penalty + DC override
+ *   [4]            validatePreconditions (mixed: pure + async DB)
+ *   [5]            resolveDice (d12 + custom attribute, no LLM)
+ *   [Equip/NPC]    Equipment ATK/DEF + NPC stats/abilities preprocessing
+ *   [CombatDetect] Combat state detection (3 paths: DB / first encounter / aggro)
+ *   [6C]           NPC Combat Strategy Agent (LLM, conditional)
+ *   [MP check]     MP precondition check for SPELL_CAST
+ *   [6]            synthesizeOutcome (pure)
+ *   [6B]           NPC Action Agent (MODEL_FAST)
+ *   [DeathPreDet]  Death pre-detection (player + NPC HP projection)
+ *   [7]            assembleContext (merge all data + outcome + NPC actions)
+ *   [8]            constructPrompt (+ ending/combat directives)
+ *   [9]            generateResponse (streaming SSE)
+ *   [10]           persistOutput
+ *   Phase 1:       [11-18] HP/MP + inventory + status + events + attrs + milestone + story + NPC memory ← parallel
+ *   Phase 1.5:     combat_info re-emit + combat_victory/end detection
+ *   Phase 2:       [7] dynamic field update (after Node 11, avoids race condition)
+ *   Phase 3:       [19] narrative state sync — detect items from DM text
+ *   Phase 4:       [19B] equipment manager — LLM parse + deterministic DB execution
  */
 
 import { SupabaseClient } from '@supabase/supabase-js'
@@ -265,13 +278,15 @@ export async function executeDMResponseWorkflow(
   // ── Explicit location change: regex + hint mapping (pre-DM) ──────────────
   // Collects all story nodes' location_ids and interactive_hints to build a mapping.
   // Matches player movement verbs against location names, aliases, AND scene hints.
-  // Post-DM: LLM fallback runs if regex didn't detect movement (see Phase 5 below).
+  // LLM authoritative confirmation runs after regex (see below, lines ~357-401).
   const allStoryNodes = [
     ...(storyState?.activeNodes ?? []),
     ...(storyState?.availableNextNodes ?? []),
   ]
   let preMovedByRegex = false
   let availableLocations: Array<{ id: string; name: string }> = []
+  const originalLocationId = currentLocationId
+  const originalLocationName = currentLocationName
   if (currentLocationId) {
     const connectedLocIds = allStoryNodes
       .map(n => n.location_id)
@@ -349,6 +364,51 @@ export async function executeDMResponseWorkflow(
           console.log(`[Workflow · Location] 玩家离开当前位置 → ${dest.name} (${dest.id})`)
           preMovedByRegex = true
         }
+      }
+    }
+
+    // ── LLM location confirmation (authoritative — runs after regex, before DM) ──
+    // Regex is a fast candidate detector; LLM is the gold standard that handles
+    // ambiguous cases like "如果去密室" (hypothetical, not actual movement).
+    if (availableLocations.length > 0 && currentLocationName) {
+      try {
+        const locChoices = availableLocations.map(l => l.name).join('、')
+        const regexHint = preMovedByRegex
+          ? `\n正则检测到移动关键词，候选目的地：${currentLocationName}。请判断玩家是否**真的**要移动（排除假设、提问等非实际移动语境）。`
+          : ''
+        const locCompletion = await openai.chat.completions.create({
+          model: MODEL_FAST,
+          messages: [{
+            role: 'user',
+            content: `玩家说："${msg}"${regexHint}\n\n当前位置：${originalLocationName}\n可用目的地：${locChoices}\n\n问题：根据玩家的话，玩家是否**明确**要移动到新位置？\n注意：仅当玩家明确表达要前往某个地点时才算移动。假设性语句（"如果我去X"）、提问（"去X会怎样"）、战斗、对话、使用物品等都不算移动。\n只回答目的地名称（必须从可用目的地中选），或回答"无"表示没有移动。只输出名称或"无"，不要解释。`,
+          }],
+          max_completion_tokens: 30,
+        })
+        const llmAnswer = locCompletion.choices[0]?.message?.content?.trim() ?? ''
+        if (llmAnswer && llmAnswer !== '无') {
+          const matchedLoc = availableLocations.find(l => l.name === llmAnswer || l.name.includes(llmAnswer) || llmAnswer.includes(l.name))
+          if (matchedLoc) {
+            if (matchedLoc.id !== currentLocationId) {
+              await supabase.from('sessions').update({ current_location_id: matchedLoc.id }).eq('id', sid)
+            }
+            currentLocationId = matchedLoc.id
+            currentLocationName = matchedLoc.name
+            console.log(`[Workflow · Location] LLM确认移动 → ${matchedLoc.name}${preMovedByRegex ? '（正则候选一致）' : '（正则未检测到）'}`)
+          }
+        } else {
+          // LLM says no movement — rollback if regex had moved
+          if (preMovedByRegex && originalLocationId) {
+            await supabase.from('sessions').update({ current_location_id: originalLocationId }).eq('id', sid)
+            currentLocationId = originalLocationId
+            currentLocationName = originalLocationName ?? currentLocationName
+            console.log(`[Workflow · Location] LLM否决正则移动，回滚 → ${currentLocationName}`)
+          } else {
+            console.log(`[Workflow · Location] LLM判定：未移动`)
+          }
+        }
+      } catch (locErr) {
+        // LLM failed — trust regex result (if any) as fallback
+        console.error('[Workflow · Location] LLM位置判定失败，保留正则结果:', locErr)
       }
     }
   }
@@ -1660,36 +1720,6 @@ export async function executeDMResponseWorkflow(
     const equipActions = await parseEquipCommands(msg, openai, equipInventoryNames)
     if (equipActions.length > 0) {
       await executeEquipActions(equipActions, sid, supabase)
-    }
-
-    // Phase 5: LLM-based location change detection (fallback when regex missed)
-    // Only runs if: (a) regex didn't move, (b) there are other locations available, (c) NOT in combat
-    if (!preMovedByRegex && availableLocations.length > 0 && currentLocationName && !inCombat) {
-      try {
-        const locChoices = availableLocations.map(l => l.name).join('、')
-        const locCompletion = await openai.chat.completions.create({
-          model: MODEL_FAST,
-          messages: [{
-            role: 'user',
-            content: `玩家说："${msg}"\nDM回应：${dmResponse.slice(0, 400)}\n\n当前位置：${currentLocationName}\n可用目的地：${locChoices}\n\n问题：根据玩家行动和DM叙述，玩家是否**明确**移动到了新位置？\n注意：仅当DM叙述明确描述玩家到达/进入了某个新地点时才算移动。战斗、对话、使用物品等不算移动。如果DM只是提到某个地点的名字但玩家没有实际前往，不算移动。\n只回答目的地名称（必须从可用目的地中选），或回答"无"表示没有移动。只输出名称或"无"，不要解释。`,
-          }],
-          max_completion_tokens: 30,
-        })
-        const llmAnswer = locCompletion.choices[0]?.message?.content?.trim() ?? ''
-        if (llmAnswer && llmAnswer !== '无') {
-          const matchedLoc = availableLocations.find(l => l.name === llmAnswer || l.name.includes(llmAnswer) || llmAnswer.includes(l.name))
-          if (matchedLoc) {
-            await supabase.from('sessions').update({ current_location_id: matchedLoc.id }).eq('id', sid)
-            currentLocationId = matchedLoc.id
-            currentLocationName = matchedLoc.name
-            console.log(`[Workflow · Location] LLM判定玩家移动 → ${matchedLoc.name} (${matchedLoc.id})`)
-          }
-        } else {
-          console.log(`[Workflow · Location] LLM判定：未移动`)
-        }
-      } catch (locErr) {
-        console.error('[Workflow · Location] LLM位置判定失败（非致命）:', locErr)
-      }
     }
 
     onMeta?.({ type: 'status', data: { message: '状态更新完成' } })

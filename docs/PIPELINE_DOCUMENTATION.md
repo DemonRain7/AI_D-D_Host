@@ -27,78 +27,115 @@
 
 ```
 玩家消息 ──→ [API Route] ──→ executeDMResponseWorkflow()
-                                    │
-                    ┌───────────────┴───────────────┐
-                    ▼                               ▼
-              [Node 1] 输入验证              [Node 2A+2B] 并行
-                                         数据检索 + 意图分类
-                                                │
-                              ┌──────────────────┼──────────────────┐
-                              ▼                  ▼                  ▼
-                     [Node 3B] 玩家状态    [Node 3A] RAG      [Node 3C-F]
-                     （先执行，其他节点         意图感知检索     场景事件/里程碑/
-                      依赖其属性值）                           故事状态/NPC记忆
-                              │                                    │
-                              ├────────────────────────────────────┘
+                              │
                               ▼
-                    [位置检测] regex移动动词 + 地名匹配
+═══════════════════ 阶段1: 输入 + 意图 ═══════════════════
+                    [Node 1] 输入验证（sessionId/message 非空）
                               ▼
-                    [Node 0] 行动有效性门控（物品可达性检查）
+                    [Node 2A + 2B] ── Promise.all ──
+                    │ 2A: 数据检索（世界/玩家/历史/实体） │
+                    │ 2B: LLM意图分类（7种意图）         │
+                    ─────────────────────────────────────
                               ▼
-                    [模糊目标拦截] "敌人""怪物"等模糊词 → 短路拒绝
+                    [META短路] intent=META → 模板响应，return跳过全部Pipeline
+                              │ (非META继续 ↓)
+═══════════════════ 阶段2: 上下文检索 ═══════════════════
                               ▼
-                    [战斗安全网] preInCombat检测 → 强制triggered
+                    [Node 3B] 玩家状态加载（先执行，后续依赖其属性值）
                               ▼
-                    [重试惩罚] 同地点同类型连续失败 → DC+2/3次锁定
+                    [preInCombat] session_npc_stats.in_combat 轻量查询
                               ▼
-                    [Node 4] 前置条件校验（纯函数）
+                    [Node 3A+3C+3D+3E+3F] ── Promise.all ──
+                    │ 3A: 意图感知RAG（pgvector）          │
+                    │ 3C: 场景事件生成（LLM，是否roll+DC）  │
+                    │ 3D: 里程碑加载（最近5条）             │
+                    │ 3E: 故事状态加载（活跃/可用节点）      │
+                    │ 3F: NPC记忆加载                      │
+                    ─────────────────────────────────────────
                               ▼
-                    [Node 5] 骰子引擎（d12 + 自定义属性）
+═══════════════════ 阶段3: 预处理 + 门控（experience-based的门控机制） ═══════════════════
+                    [位置系统] 加载+自动初始化 → 3-pass正则 → LLM权威确认
                               ▼
-                    [装备/NPC预处理] 装备ATK/DEF汇总 + NPC装备/技能加载（所有意图）
+                    [Node 0] 行动有效性门控（物品可达性+锁定检查）
+                              │ blocked → return 短路
                               ▼
-                    [战斗状态检测] 3路径：DB in_combat / 首次遭遇 / 非敌对激怒
+                    [模糊目标拦截] "敌人""怪物"等模糊词（排除NPC名白名单）
+                              │ matched → return 短路
                               ▼
-                    [Node 6C] NPC战斗策略Agent（LLM，战斗时触发）
+                    [地点物品加载] 当前位置可获取物品（排除已拥有+未解锁）
+                              ▼
+                    [战斗装备检测] 战斗中装卸装备 → 视为浪费回合（triggered=false）
+                              ▼
+                    [战斗安全网] preInCombat + COMBAT/SPELL_CAST → 强制triggered
+                              ▼
+                    [重试惩罚] 同地点同骰子类型连续失败 → DC+2/次，3次→return锁定
+                              ▼
+                    [DC覆盖] NPC dc_thresholds + acquisition_dc → 覆盖LLM DC
+                              ▼
+═══════════════════ 阶段4: 机械判定 ═══════════════════
+                    [Node 4] 前置条件校验（5个micro-agent并行：3纯函数+2异步DB）
+                              ▼
+                    [Node 5] 骰子引擎（d12 + 自定义属性修正，纯函数）
+                              ▼
+                    [装备/NPC预处理] ── 所有意图均执行 ──
+                    │ 玩家装备ATK/DEF汇总                           │
+                    │ NPC目标解析（4级回退：指名→hostile→RAG→DB）    │
+                    │ NPC装备加载（atk_bonus/def_bonus）            │
+                    │ NPC技能加载（npc_abilities + abilities表）    │
+                    │ NPC当前HP/MP（session_npc_stats）             │
+                    ─────────────────────────────────────────────────
+                              ▼
+                    [战斗状态检测] 3路径：
+                      Path 1: DB in_combat=true（持续战斗）
+                      Path 2: hostile NPC + 玩家指名 + 攻击意图（首次遭遇）
+                      Path 3: 非敌对NPC + 连续3次攻击（激怒开战）
+                              ▼
+                    [Node 6C] NPC战斗策略Agent（LLM，战斗时触发，失败→纯函数回退）
+                              ▼
+                    [技能/物品查找] SPELL_CAST→ability_damage/mp_cost
+                                   ITEM_USE→item_stats(hp_restore/mp_restore)
                               ▼
                     [MP前置检查] SPELL_CAST: MP < mp_cost → 阻止施法
                               ▼
-                    [Node 6] 结果合成器（纯函数，无LLM）
+                    [Node 6] 结果合成器（纯函数，无LLM，确定性规则引擎）
                               ▼
-                    [Node 6B] NPC行动代理（LLM工具调用）
+                    [Node 6B] NPC行动代理（LLM，一次调用处理所有NPC）
                               ▼
-                    [死亡预检测] 玩家HP/NPC HP预投影 → 注入结局台本
+═══════════════════ 阶段5: 叙事生成 ═══════════════════
+                    [死亡预检测] 玩家HP/NPC HP投影 → 注入结局台本
                               ▼
-                    [Node 7] 上下文组装
+                    [战斗掉落查询] NPC即将死亡 → 查询droppable装备
                               ▼
-                    [Node 8] Prompt构造（注入结局指令 + 战斗指令）
+                    [Node 7] 上下文组装（合并所有数据+NPC技能列表+掉落物品）
+                              ▼
+                    [Node 8] Prompt构造（注入结局指令 + 战斗模式指令）
                               ▼
                     [Node 9] 流式叙事生成 ──→ SSE ──→ 前端
                               ▼
-                    [战斗SSE] combat_start / combat_info / 战斗摘要
+                    [战斗摘要] 程序化生成双栏战况，SSE meta事件
                               ▼
                     [死亡/结局检测] game_over / game_complete → SSE
                               ▼
-                    [Node 10] 输出持久化
+═══════════════════ 阶段6: 状态持久化 ═══════════════════
+                    [Node 10] 输出持久化（session_messages）
                               │
                     ┌─────────┴─────────── Awaited（SSE进度事件）
                     ▼
-              Phase 1（并行）:
-                [11] HP/MP更新    [12] 背包更新    [13] 状态效果
-                [14] 事件日志    [15] 属性增长    [16] 里程碑检测
+              Phase 1（并行，Promise.all）:
+                [11] HP/MP更新    [12] 背包更新      [13] 状态效果
+                [14] 事件日志    [15] 属性增长      [16] 里程碑检测
                 [17] 故事节点完成  [18] NPC记忆更新
+                [技能授予] learningAbility成功→入库
+                [死亡结局] HP≤0 → 激活ending_bad节点
               Phase 1.5:
                 [combat_info二次发送] 更新后的NPC HP/MP + npcAction
                 [combat_victory检测] NPC HP≤0 → victory → combat_end
-                [game_complete检测] 结局节点激活 → 清理战斗 → settlement
               Phase 2:
                 [7] 动态字段更新（等Node 11完成，避免竞态）→ 同步HP/MP到core_stats
               Phase 3:
-                [19] 叙事状态同步（LLM分析DM文本→物品入库，不检测技能/法术使用）
+                [19] 叙事状态同步（LLM分析DM文本→物品入库，严格目录验证）
               Phase 4:
                 [19B] 装备管理器（LLM解析装卸指令 → 确定性DB执行）
-              Phase 5:
-                [位置LLM回退] regex未检测到移动 → LLM判定是否移动（非战斗时）
 ```
 
 ---
@@ -130,6 +167,7 @@
   - SPELL_CAST vs COMBAT：使用法术/技能名 → SPELL_CAST，使用武器/徒手 → COMBAT
   - ITEM_USE vs COMBAT：使用物品发动攻击 → COMBAT（不是ITEM_USE）
   - targetEntity = 主要目标（攻击时为NPC名，物品使用时为物品名）
+  - SOCIAL + 学习/教授关键词：mentionedEntities 同时包含NPC名和技能名（如"请老头教我火球术" → entities=["老头","火球术"]）
 - **批量操作检测**：识别"拾取所有"、"装备全部"等批量模式，设置 `isBatchAction=true`
 - **调用工具**：`classify_intent`（OpenAI Function Calling），返回结构化的 intent + confidence + mentionedEntities + targetEntity + isBatchAction
 - **输出**：IntentClassification（意图类型 + 置信度 + 提及实体 + 目标实体 + 批量标记）
@@ -196,18 +234,32 @@
   - 每点属性值给骰子+1修正，所以高属性玩家仍能挑战高DC
 - **不触发骰子的情况**：纯叙事、移动、观察、拾取物品、使用/装备已拥有物品、与非魔法日常物体的简单交互
 - **必须触发的情况**：战斗、施法、说服/欺骗NPC、激活魔法祭坛/仪式物品/关键故事机关、敌对NPC出现
-- **战斗安全网**（workflow.ts）：在 Node 3C 之后，如果 `preInCombat && !effectiveScenarioEvent.triggered`，workflow 强制覆盖为 `{ triggered: true, diceType: 'COMBAT', dc: 6 }`
+- **战斗安全网**（workflow.ts）：在 Node 3C 之后，**仅当 intent=COMBAT/SPELL_CAST 时**，如果 `preInCombat && !effectiveScenarioEvent.triggered && isCombatIntent`，workflow 强制覆盖为 `{ triggered: true, diceType: 'COMBAT', dc: 6 }`。非战斗意图（EXPLORE/ITEM_USE/SOCIAL等）不强制触发，由 Node 3C 自行决定
+
+### DC覆盖系统（workflow.ts）
+- **类型**：纯函数（数据库读取 + 数值计算）
+- **位置**：Node 3C 之后、Node 4 之前
+- **功能**：使用世界设计者定义的DC阈值覆盖LLM生成的DC值
+- **三层DC来源**：
+  1. **NPC dc_thresholds**：`combat_stats.dc_thresholds.{combat|persuasion|chaos|charm|wit}`（与骰子维度对应）
+  2. **Ability acquisition_dc**：`ability_stats.acquisition_dc`（说服NPC学习技能的额外DC，叠加到NPC阈值上）
+  3. **Item acquisition_dc**：`item_stats.acquisition_dc`（说服NPC获取物品的额外DC）
+- **null回退**：dc_thresholds 中 null 值表示回退到LLM判断（向后兼容）
+- **与自适应DC的关系**：世界设计者显式设定的DC不受自适应DC上限限制。重试惩罚仍然叠加
+- **示例**：NPC PERSUASION DC=9 + ability acquisition_dc=5 → 说服学技能总DC=14
 
 ### Node 4: Precondition Validator（前置条件校验）
-- **类型**：纯函数（无LLM、无数据库）
+- **类型**：混合（纯函数 + 异步数据库验证）
 - **功能**：检查玩家是否满足执行当前行动的前置条件
-- **4项检查**（并行执行）：
+- **5项检查**（并行执行，Promise.all）：
   1. **背包检查**：ITEM_USE → 背包中是否有该物品（严格名称匹配）
-  2. **技能检查**：SPELL_CAST → 是否掌握该技能（slot_type='ability'的背包物品匹配）。返回spellInfo（attackBonus=2+wit, saveDC=8+wit）
+  2. **技能检查**：SPELL_CAST → 是否掌握该技能（slot_type='ability'的背包物品匹配）+ **世界目录交叉验证**（abilities表ilike确认技能存在于世界中）。返回spellInfo（attackBonus=2+wit, saveDC=8+wit）
   3. **武器/能力检查**：COMBAT → 查找weapon_1/weapon_2槽位的装备武器，返回weaponStats（attackBonus=playerState.attack）
   4. **场景一致性检查**（仅COMBAT意图）：玩家攻击目标是否存在于当前故事节点的 `interactive_hints` 列表中，**或**是否为 RAG/世界数据中已知的 NPC 名称（动态召唤的NPC不在 interactive_hints 中但仍可战斗）
+  5. **技能学习验证**（Micro-Agent E，异步）：SOCIAL + 学习关键词 → 验证技能是否存在于世界目录（abilities表）+ NPC是否拥有该技能（npc_abilities表）+ NPC别名匹配（获取所有世界NPC的name+aliases做内存模糊匹配）。返回 `learningAbility: { abilityId, abilityName }`
+- **异步化说明**：Micro-Agent B（技能检查）和E（学习验证）需要查询数据库，函数签名新增 `worldId` + `supabase` 参数。其余3个仍为纯函数
 - **注意**：法术位消耗检查已移除（预留为世界模组扩展）。Debuff阻止行动是TODO项
-- **输出**：canProceed (布尔) + 失败原因 + weaponStats + spellInfo
+- **输出**：canProceed (布尔) + 失败原因 + weaponStats + spellInfo + learningAbility
 
 ### Node 5: Dice Engine（骰子引擎）
 - **类型**：纯函数（随机数生成）
@@ -352,9 +404,24 @@
 - **功能**：根据本轮交互更新NPC的态度、状态、关键记忆
 - **存储**：`session_npc_memories` 表
 
+### 位置系统（Location System）
+- **类型**：混合（数据库查询 + 正则匹配 + LLM 确认）
+- **位置**：Node 3 系列之后、Node 0 之前执行（DM 生成前）
+- **功能**：检测玩家是否移动到新地点，更新 `sessions.current_location_id`
+- **三步流程**：
+  1. **加载 + 自动初始化**：从 `sessions` 表读取 `current_location_id`。如果为 null，从活跃故事节点的 `location_id` 初始化，兜底取世界首个地点
+  2. **3-pass 正则匹配**（快速候选检测）：
+     - **Pass 1**：移动动词（进入/去/到/前往/走向...）+ 地点名/别名双向子串匹配
+     - **Pass 2**：移动关键词 vs 故事节点 `interactive_hints` → 解析到关联 `location_id`
+     - **Pass 3**："离开"动词（走出/离开/退出...）+ 当前地点名匹配 → 跳转首个连通地点
+  3. **LLM 权威确认**：正则候选结果提交 LLM 做最终判定。LLM 排除假设性语句（"如果我去X"）、提问（"去X会怎样"）等非实际移动。**可否决正则结果**——正则移动了但 LLM 说"无" → 回滚到原位置
+- **条件**：仅当存在可用目的地（故事节点关联的其他地点）时执行 LLM 确认
+- **回退**：LLM 调用失败时保留正则结果（如果有）
+- **与战斗的关系**：位置系统在战斗安全网之前执行，不受战斗状态影响
+
 ### Node 0: Action Validity Gate（行动有效性门控）
 - **类型**：纯函数（数据库查询 + 逻辑判定）
-- **位置**：在 Node 3 系列之后、Node 4 之前执行
+- **位置**：在位置系统之后、Node 4 之前执行
 - **功能**：检查玩家引用的物品是否可达（存在于背包中）
 - **触发条件**：`intent=ITEM_USE` 或 `intent=SPELL_CAST`
 - **检查逻辑**：遍历 `mentionedEntities` 在 `player_inventory` 中查找匹配物品
@@ -364,14 +431,19 @@
 ### Node 19: Narrative State Sync（叙事状态同步）
 - **类型**：LLM工具调用
 - **模型**：MODEL_FAST (gpt-4.1)
-- **功能**：从DM叙事文本中检测**物品**获取/失去/使用，同步到数据库
+- **功能**：从DM叙事文本中检测**物品**获取/失去/使用，同步到数据库。新增**严格目录验证**
 - **不检测的内容**：
-  - 技能/能力的习得或失去（技能作为物品通过正常拾取流程获得）
-  - **施放技能/法术不是物品消耗**：如"释放火球术"、"使用暗影步"等技能使用通过MP消耗处理，不从背包扣除。只有物理消耗品（药水、卷轴、食物等一次性道具）才算 `used`
+  - 技能/法术的**使用**（通过MP消耗处理，不从背包扣除）
+  - **注意**：技能的"学习/习得"可由DM叙述触发，但必须通过世界目录验证——gained物品必须存在于items表或abilities表中，且abilities必须有NPC拥有
 - **3种物品变化类型**：gained（获得）、lost（失去）、used（使用/消耗物理道具）
 - **严格判定规则**：物品"存在于场景中"≠玩家"获得"。必须同时满足：玩家有获取意图 + DM确认获取动作
+- **严格目录验证**（新增）：
+  - `gained` 物品必须在世界 `items` 表或 `abilities` 表中找到匹配（ilike模糊匹配）
+  - 如果匹配到 ability 而非 item：额外检查是否有 NPC 拥有该技能（`npc_abilities` 表）
+  - 不在世界目录中的物品/技能 → 静默跳过（`continue`），不入库
+  - 防止DM幻觉创造不存在的物品（如"液体操控"）
 - **防重复**：如果物品已被 Node 12 添加，跳过重复插入，只补充目录元数据（item_id、description）
-- **流程**：分析DM文本 → 模糊匹配世界物品目录 → upsert到 player_inventory
+- **流程**：分析DM文本 → 严格目录验证 → 模糊匹配世界物品目录 → upsert到 player_inventory
 - **位置**：Phase 3 执行，因为需要完整的DM回应
 
 ### Node 19B: Equipment Manager（装备管理器）
@@ -418,11 +490,15 @@ playerExplicitlyNamedTarget &&  // 玩家必须明确指名敌人
 
 ### 战斗安全网
 
-在 Node 3C 执行后，workflow 检查 `session_npc_stats.in_combat=true` 的 NPC 是否存在（`preInCombat`）。如果玩家处于活跃战斗但 Node 3C 返回 `triggered=false`，强制覆盖为：
+在 Node 3C 执行后，workflow 检查 `session_npc_stats.in_combat=true` 的 NPC 是否存在（`preInCombat`）。**仅当玩家意图为 COMBAT 或 SPELL_CAST 时**，如果 Node 3C 返回 `triggered=false`，强制覆盖为：
 ```typescript
-{ triggered: true, diceType: 'COMBAT', dc: 6, eventTitle: '战斗继续', ... }
+const isCombatIntent = intent.intent === 'COMBAT' || intent.intent === 'SPELL_CAST'
+if (preInCombat && !effectiveScenarioEvent.triggered && !isEquipActionInCombat && isCombatIntent) {
+  // 强制覆盖
+  { triggered: true, diceType: 'COMBAT', dc: 6, eventTitle: '战斗继续', ... }
+}
 ```
-这防止了 LLM 幻觉导致的战斗中断。
+**意图过滤**：非战斗意图（EXPLORE、ITEM_USE、SOCIAL等）在战斗中不被强制触发骰子。例如"捡起试炼之印离开"（EXPLORE）不会攻击友好NPC，而是由 Node 3C 自行决定是否roll。NPC 仍可通过 Node 6 的免费攻击机制反击玩家的非攻击操作。
 
 ### 回合制战斗 SSE 事件
 
@@ -599,11 +675,67 @@ NPC免费攻击（玩家浪费回合）: damage = max(1, NPC_ATK - 玩家总DEF)
 
 ---
 
-## 六、设计亮点
+## 六、面试问答准备
+
+### Q: 请大致讲一下你设计的LangChain/Agent流程
+
+**A:**
+我们的系统不是传统的LangChain链式调用，而是一个**自定义的20节点多智能体流水线**。每次玩家发消息，流水线执行以下步骤：
+
+1. **意图分析阶段**（并行）：首先验证输入，然后同时进行两件事——从数据库加载世界和玩家数据，以及用100% LLM Function Calling将玩家消息分类为7种意图之一（战斗、施法、物品使用、探索、社交、叙事、元问询）。所有正则分类已移除，分类完全依赖 `classify_intent` 工具调用。
+
+2. **上下文检索阶段**（并行）：基于分类结果，并行执行6个子任务——意图感知的向量RAG检索、玩家状态加载、场景事件生成（决定是否roll骰子和DC值）、里程碑加载、故事节点加载、NPC记忆加载。
+
+3. **预处理阶段**（顺序）：位置系统（3-pass正则+LLM权威确认，DM生成前执行）→ 行动有效性门控（Node 0，物品可达性）→ 模糊目标拦截（"敌人""怪物"等泛称短路拒绝）→ 战斗安全网（`in_combat=true` 时强制触发骰子）→ 重试惩罚（同地点同类型连续失败 → DC+2，3次锁定）。
+
+4. **机械判定阶段**（顺序）：先验证前置条件（Node 4），再执行d12骰子引擎（Node 5），然后装备ATK/DEF汇总+NPC预处理，NPC战斗策略选择（Node 6C），MP前置检查，最后用纯函数合成结果（Node 6）——这步完全不用LLM，而是确定性的规则计算。
+
+5. **叙事生成阶段**：死亡预检测（HP投影≤0时注入结局台本）→ 上下文组装（Node 7）→ Prompt构造（Node 8）→ GPT-4.1流式生成DM叙事（Node 9）→ 战斗SSE事件 → 死亡/结局检测。
+
+6. **状态更新阶段**（4个Phase + SSE进度）：
+   - **Phase 1**（并行）：HP/MP更新(11)、背包更新(12)、状态效果(13)、事件日志(14)、属性增长(15)、里程碑检测(16)、故事节点完成(17)、NPC记忆(18)、**技能机械授予**（learningAbility成功→直接入库）
+   - **Phase 1.5**：combat_info二次发送（更新后HP/MP + npcAction）→ combat_victory检测 → game_complete检测
+   - **Phase 2**：动态字段更新（Node 7，等Node 11完成避免竞态）→ 同步HP/MP到core_stats
+   - **Phase 3**：叙事状态同步（Node 19，LLM分析DM文本→物品入库，不检测技能使用）
+   - **Phase 4**：装备管理器（Node 19B，LLM解析装卸指令→确定性DB执行）
+
+### Q: 设计过程中遇到过什么问题？
+
+**A:**
+
+1. **竞态条件**：Node 11（HP更新）和Node 7（动态字段更新）都读写 `players.dynamic_fields`，如果并行执行会互相覆盖。解决方案是强制Node 7等Node 11完成后再执行。
+
+2. **ATK-DEF战斗体系**：从D&D六属性简化为ATK/DEF/HP/MP四属性，统一战斗公式`max(1, ATK-DEF)`。装备系统通过9个槽位（2武器+3护甲+4饰品）提供atk_bonus/def_bonus加成。
+
+3. **NPC战斗策略**：最初NPC技能选择是纯函数（选最高伤害），后改为LLM Agent（Node 6C）。Agent考虑NPC HP/MP比例、玩家威胁等因素做战术决策，失败时回退纯函数。
+
+4. **LLM幻觉导致战斗中断**：Node 3C（场景事件生成器）在活跃战斗中仍可能返回 `triggered=false`，导致玩家明确说"继续攻击"却显示"未采取行动"。解决方案：(a) 向 Node 3C prompt 注入 inCombat 战斗状态警告，(b) workflow 层面设置安全网强制覆盖。
+
+5. **战斗触发条件过窄**：最初只有 `diceType=COMBAT` 才进入战斗分支，导致施法攻击（WIT骰）不触发战斗伤害。改为 `diceType=COMBAT || inCombat`。同时增加了 `playerExplicitlyNamedTarget` 门控——RAG 可能通过语义相似度返回 hostile NPC，但必须玩家在消息中明确提到该NPC才触发战斗，防止"释放火球术"（无目标）误触发。
+
+6. **物品自动装备**：玩家通过剧情获得武器后，`equipped` 默认 `false`，前端"已装备"区域永远为空。解决方案：Node 12 和 Node 19 获得物品时自动查找世界物品目录，有 ATK/DEF 属性的物品自动装备。
+
+7. **HP 双重扣除**：Node 11 处理战斗伤害后，Node 7（动态字段更新）的 LLM 又根据 DM 文本二次扣血。解决方案：引入 `hpDeltaAppliedByNode11` 标志，当战斗已处理HP时 Node 7 跳过 hp/mp 字段。
+
+8. **PostgreSQL RPC返回类型变更**：`match_npcs` RPC新增 `combat_stats` 返回列时，`CREATE OR REPLACE FUNCTION` 报错"cannot change return type"。必须先 `DROP FUNCTION` 再重建。
+
+9. **前端刷新时序**：最初后台节点是Fire-and-Forget异步，前端需要多次延时刷新（0s/6s/10s）。改为Awaited模式后，所有更新在done事件前完成，前端刷新一次即可。
+
+10. **意图感知RAG精度**：最初所有实体用同一个检索策略，导致COMBAT意图下也返回无关地点。改为根据意图类型调整检索权重和目标表。
+
+11. **DC自适应**：最初DC范围固定4-11，但玩家属性增长后（如战斗值30），即使最高DC 11也轻松通过。解决方案是引入自适应DC上限：`11 + floor(attr/5) * 2`，每5点属性让DC上限增加2。
+
+12. **叙事状态同步误判技能为物品**：Node 19 的 LLM 将"使用火球术"解读为物品消耗，从背包中扣除了技能。解决方案：在 system prompt 中明确区分——施放技能/法术通过MP消耗，不是物品消耗；只有物理消耗品（药水、卷轴等）才算 `used`。
+
+13. **装备管理从LLM叙事分析改为独立管理器**：最初 Node 19 同时检测物品变化和装备/卸装，但LLM分析DM叙事文本的装备判定不可靠。解决方案：拆分为 Node 19B 独立装备管理器——Phase A 用LLM从**玩家原始消息**（非DM叙事）解析装卸指令，Phase B 用确定性逻辑执行DB操作。
+
+---
+
+## 七、设计亮点
 
 1. **并行化**：利用Promise.all最大化并行，将总延迟控制在可接受范围
 2. **纯函数隔离**：Node 4/5/6是纯函数，无LLM无数据库，确保确定性和可测试性
-3. **Awaited + SSE进度模式（5 Phase）**：Node 10持久化后，await 5个Phase的状态更新完成再返回done事件。通过SSE status事件实时展示更新进度。好处是前端刷新一次即可获取最新状态
+3. **Awaited + SSE进度模式（4 Phase）**：Node 10持久化后，await 4个Phase的状态更新完成再返回done事件。通过SSE status事件实时展示更新进度。好处是前端刷新一次即可获取最新状态
 4. **意图感知RAG**：不是盲目检索所有表，而是根据意图类型精准检索相关实体
 5. **100% LLM 意图分类**：所有正则模式匹配已移除，分类完全依赖 Function Calling。正则维护成本高且中文表达覆盖不全，GPT-4.1 function calling 足够快（<200ms）
 6. **五维属性 + 自适应DC**：玩家属性真正影响骰子结果，DC随属性增长而增长
@@ -617,3 +749,7 @@ NPC免费攻击（玩家浪费回合）: damage = max(1, NPC_ATK - 玩家总DEF)
 14. **场景一致性 + 动态NPC**：Node 4 场景检查同时接受 interactive_hints（静态）和 RAG 世界NPC（动态），支持通过故事事件召唤的NPC直接进入战斗
 15. **NPC 多技能类型**：NPC支持攻击技能（damage>0）、治疗技能（hp_restore>0）、吸血技能（hp_restore<0，无视DEF），由 Node 6C LLM Agent 根据战场情况选择
 16. **重试惩罚机制**：同地点同类型连续失败 → DC+2/次，3次失败 → 该操作锁定，防止暴力重试
+17. **自定义DC阈值**：世界设计者可在NPC的combat_stats中设置dc_thresholds（五维DC），在ability/item的stats中设置acquisition_dc（获取难度），Pipeline在Node 3C之后用确定性值覆盖LLM生成的DC
+18. **机械技能学习**：Node 4验证技能存在性+NPC所有权 → learningAbility携带信息通过Pipeline → Phase 1中grantLearnedAbility()确定性入库。绕过"DM叙述→Node 19检测"的脆弱链路
+19. **技能真实性守卫**：多层防御——Node 4 SPELL_CAST世界目录交叉验证、Node 19严格目录验证、DM prompt Rule 9禁止虚构技能。杜绝"液体操控"等幻觉技能
+20. **战斗安全网意图过滤**：安全网只对COMBAT/SPELL_CAST意图强制触发骰子，EXPLORE/ITEM_USE/SOCIAL等非战斗意图在战斗中不被强制（如"捡起物品离开"不会攻击NPC）
