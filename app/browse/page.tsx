@@ -28,6 +28,7 @@ export default function BrowseWorldsPage() {
       const { data, error } = await supabase
         .from('worlds')
         .select('*')
+        .neq('setting', 'A new world waiting to be defined')
         .order('created_at', { ascending: false })
 
       if (error) throw error
