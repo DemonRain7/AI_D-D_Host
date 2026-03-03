@@ -1,0 +1,16 @@
+jobid,schedule,command,nodename,nodeport,database,username,active,jobname
+3,0 3 * * 0,"
+    REINDEX INDEX CONCURRENTLY idx_worlds_embedding;
+    REINDEX INDEX CONCURRENTLY idx_abilities_embedding;
+    REINDEX INDEX CONCURRENTLY idx_items_embedding;
+    REINDEX INDEX CONCURRENTLY idx_organizations_embedding;
+    REINDEX INDEX CONCURRENTLY idx_taxonomies_embedding;
+    REINDEX INDEX CONCURRENTLY idx_locations_embedding;
+    REINDEX INDEX CONCURRENTLY idx_npcs_embedding;
+    REINDEX INDEX CONCURRENTLY idx_rules_embedding;
+    REINDEX INDEX CONCURRENTLY idx_story_nodes_embedding;
+    REINDEX INDEX CONCURRENTLY idx_generated_items_embedding;
+    REINDEX INDEX CONCURRENTLY idx_generated_characters_embedding;
+    REINDEX INDEX CONCURRENTLY idx_generated_locations_embedding;
+    REINDEX INDEX CONCURRENTLY idx_generated_abilities_embedding;
+  ",localhost,5432,postgres,postgres,true,reindex-ivfflat-weekly

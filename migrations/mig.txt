@@ -1,0 +1,20 @@
+-- 1. 所有表结构
+SELECT table_name, column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public'
+ORDER BY table_name, ordinal_position;
+
+-- 2. 所有索引
+SELECT indexname, indexdef 
+FROM pg_indexes 
+WHERE schemaname = 'public' 
+ORDER BY indexname;
+
+-- 3. 所有自定义函数（排除聚合函数）
+SELECT proname, pg_get_functiondef(oid) 
+FROM pg_proc 
+WHERE pronamespace = 'public'::regnamespace
+  AND prokind != 'a';
+
+-- 4. pg_cron 任务
+SELECT * FROM cron.job;
