@@ -1,0 +1,21 @@
+schemaname,tablename,policyname,permissive,roles,cmd,qual,with_check
+public,world_starter_abilities,Anyone can read world starter abilities,PERMISSIVE,{public},SELECT,true,null
+public,world_starter_abilities,Owners can manage world starter abilities,PERMISSIVE,{public},ALL,"(world_id IN ( SELECT worlds.id
+   FROM worlds
+  WHERE (worlds.created_by = auth.uid())))",null
+public,world_starter_equipment,Anyone can read world starter equipment,PERMISSIVE,{public},SELECT,true,null
+public,world_starter_equipment,Owners can manage world starter equipment,PERMISSIVE,{public},ALL,"(world_id IN ( SELECT worlds.id
+   FROM worlds
+  WHERE (worlds.created_by = auth.uid())))",null
+public,world_starter_items,Anyone can read world starter items,PERMISSIVE,{public},SELECT,true,null
+public,world_starter_items,Owners can manage world starter items,PERMISSIVE,{public},ALL,"(world_id IN ( SELECT worlds.id
+   FROM worlds
+  WHERE (worlds.created_by = auth.uid())))",null
+public,world_starter_organizations,Anyone can read world starter organizations,PERMISSIVE,{public},SELECT,true,null
+public,world_starter_organizations,Owners can manage world starter organizations,PERMISSIVE,{public},ALL,"(world_id IN ( SELECT worlds.id
+   FROM worlds
+  WHERE (worlds.created_by = auth.uid())))",null
+public,world_starter_taxonomies,Anyone can read world starter taxonomies,PERMISSIVE,{public},SELECT,true,null
+public,world_starter_taxonomies,Owners can manage world starter taxonomies,PERMISSIVE,{public},ALL,"(world_id IN ( SELECT worlds.id
+   FROM worlds
+  WHERE (worlds.created_by = auth.uid())))",null
